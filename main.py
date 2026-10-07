@@ -5,6 +5,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
+from aiohttp import web  # ← 追加：超安定サーバー用
 
 # 環境変数の読み込み
 load_dotenv()
@@ -66,14 +67,12 @@ class EventModal(discord.ui.Modal, title='🍻 打ち上げイベント作成'):
     async def on_submit(self, interaction: discord.Interaction):
         await interaction.response.defer(ephemeral=True)
         
-        # 開催日時から「〇月〇日」を抽出してスプシ名にする
         date_match = re.search(r'(\d{1,2})月(\d{1,2})日', self.event_date.value)
         if date_match:
             sheet_name = f"{date_match.group(1)}月{date_match.group(2)}日_打ち上げ"
         else:
             sheet_name = f"{self.event_date.value[:5]}_打ち上げ".replace("/", "月")
         
-        # 参加費の読み取り（Discordに表示するため「円」をつける）
         fees_dict = {}
         for g in ["1", "2", "3", "4"]:
             fee_match = re.search(rf'{g}年[:：]\s*([0-9０-９,，]+)', self.fees.value)
@@ -82,7 +81,6 @@ class EventModal(discord.ui.Modal, title='🍻 打ち上げイベント作成'):
             else:
                 fees_dict[f"{g}年"] = "要確認"
         
-        # スプレッドシートの作成
         try:
             sh = gc.open_by_key(SHEET_KEY)
             existing_sheets = [ws.title for ws in sh.worksheets()]
@@ -93,7 +91,6 @@ class EventModal(discord.ui.Modal, title='🍻 打ち上げイベント作成'):
             await interaction.followup.send(f"スプレッドシートの作成に失敗したよ: {e}", ephemeral=True)
             return
 
-        # 参加費のフォーマット（2年目以降はスペースを入れて字下げする）
         fee_lines = []
         for i, (k, v) in enumerate(fees_dict.items()):
             if i == 0:
@@ -118,7 +115,6 @@ class EventModal(discord.ui.Modal, title='🍻 打ち上げイベント作成'):
         bot_msg = await interaction.channel.send(content=message_content)
         await bot_msg.add_reaction("👍")
         
-        # ▼ 追加：リマインダー用にスプシの右端(Z列付近)にメッセージ情報を保存
         try:
             ws = sh.worksheet(sheet_name)
             meta_data = [[str(interaction.channel.id), str(bot_msg.id), self.deadline.value, "0", "0", "0"]]
@@ -238,7 +234,6 @@ async def on_raw_reaction_remove(payload):
         if deadline_match:
             try:
                 deadline_str = f"{deadline_match.group(1)} {deadline_match.group(2)}"
-                # 締切を日本時間で認識
                 deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
                 if datetime.now(JST) > deadline:
                     try:
@@ -263,9 +258,9 @@ async def on_raw_reaction_remove(payload):
             print(f"キャンセルエラー: {e}")
 
 # ==========================================
-# ▼ 追加：リマインダーをチェックするループ処理 ▼
+# リマインダーをチェックするループ処理
 # ==========================================
-@tasks.loop(minutes=30)  # 30分ごとにチェック
+@tasks.loop(minutes=30)
 async def reminder_task():
     try:
         sh = gc.open_by_key(SHEET_KEY)
@@ -275,7 +270,6 @@ async def reminder_task():
             if ws.title == "template":
                 continue
 
-            # スプシのZ1〜AE1に保存したデータを取得
             meta = ws.get('Z1:AE1')
             if not meta or len(meta[0]) < 6:
                 continue
@@ -295,53 +289,62 @@ async def reminder_task():
 
             time_left = deadline - now
             
-            # 締切を過ぎている場合は何もしない
             if time_left.total_seconds() < 0:
                 continue
 
             remind_msg = None
             update_cell = None
 
-            # 12時間前通知
             if time_left <= timedelta(hours=12) and flag_12h == "0":
                 remind_msg = "⏰ **【リマインド】**\n締切まであと **12時間** を切ったよ！未回収の人は急いでね！"
                 update_cell = 'AE1'
-            # 3日前通知
             elif time_left <= timedelta(days=3) and flag_3d == "0":
                 remind_msg = "⏰ **【リマインド】**\n締切まであと **3日** だよ！参加予定で未回答の人は早めにリアクションしてね！"
                 update_cell = 'AD1'
-            # 7日前通知
             elif time_left <= timedelta(days=7) and flag_7d == "0":
                 remind_msg = "⏰ **【リマインド】**\n締切まであと **1週間（7日）** だよ！予定がわかった人はリアクションよろしくね！"
                 update_cell = 'AC1'
 
-            # 条件に合えば元のメッセージを「引用」して送信
             if remind_msg and update_cell:
                 channel = bot.get_channel(channel_id)
                 if channel:
                     try:
                         msg = await channel.fetch_message(msg_id)
                         await msg.reply(content=remind_msg)
-                        ws.update_acell(update_cell, "1")  # 送信済みフラグを立てる
+                        ws.update_acell(update_cell, "1")
                     except Exception as e:
                         print(f"通知の送信に失敗: {e}")
 
     except Exception as e:
         print(f"リマインダータスクのエラー: {e}")
 
+# ==========================================
+# RenderのWeb Service用：HTTPサーバー（改良版）
+# ==========================================
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
+@bot.event
+async def setup_hook():
+    # ボット起動時にWebサーバーも一緒に立ち上げる
+    bot.loop.create_task(web_server())
+
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f'ログイン完了: {bot.user}')
-    reminder_task.start() 
+    # エラー防止：すでに動いている場合は再スタートしない
+    if not reminder_task.is_running():
+        reminder_task.start() 
 
-# ==========================================
-# RenderのWeb Service用：簡易HTTPサーバー
-# ==========================================
-from http.server import HTTPServer, BaseHTTPRequestHandler
-import threading
-
-class SimpleHandler(BaseHTTPRequestHandler):
-    def do_GET(self):
-        self.send_response(200)
-        self.end_headers()
+bot.run(TOKEN)
