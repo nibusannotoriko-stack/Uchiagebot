@@ -5,7 +5,7 @@ import os
 import re
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
-from aiohttp import web  # ← 追加：超安定サーバー用
+from aiohttp import web
 
 # 環境変数の読み込み
 load_dotenv()
@@ -205,6 +205,8 @@ async def on_raw_reaction_add(payload):
                 
             ws.update(range_name=f'A{row_index}:D{row_index}', values=[[user_name, univ, grade, fee]])
             ws.format(f'A{row_index}:D{row_index}', {"textFormat": {"strikethrough": False}})
+            # 参加し直した場合はキャンセルの文字を消す
+            ws.update_acell(f'E{row_index}', "")
         except Exception as e:
             print(f"参加エラー: {e}")
 
@@ -254,6 +256,8 @@ async def on_raw_reaction_remove(payload):
             if user_name in names:
                 row_index = names.index(user_name) + 1
                 ws.format(f'A{row_index}:D{row_index}', {"textFormat": {"strikethrough": True}})
+                # E列にキャンセルを記録する
+                ws.update_acell(f'E{row_index}', "キャンセル")
         except Exception as e:
             print(f"キャンセルエラー: {e}")
 
@@ -296,21 +300,20 @@ async def reminder_task():
             update_cell = None
 
             if time_left <= timedelta(hours=12) and flag_12h == "0":
-                remind_msg = "⏰ **【リマインド】**\n締切まであと **12時間** を切ったよ！未回収の人は急いでね！"
+                remind_msg = "打ち上げ締切まであと12時間です！"
                 update_cell = 'AE1'
             elif time_left <= timedelta(days=3) and flag_3d == "0":
-                remind_msg = "⏰ **【リマインド】**\n締切まであと **3日** だよ！参加予定で未回答の人は早めにリアクションしてね！"
+                remind_msg = "打ち上げ締切まであと3日です！"
                 update_cell = 'AD1'
             elif time_left <= timedelta(days=7) and flag_7d == "0":
-                remind_msg = "⏰ **【リマインド】**\n締切まであと **1週間（7日）** だよ！予定がわかった人はリアクションよろしくね！"
+                remind_msg = "打ち上げ締切まであと7日です！"
                 update_cell = 'AC1'
 
             if remind_msg and update_cell:
                 channel = bot.get_channel(channel_id)
                 if channel:
                     try:
-                        msg = await channel.fetch_message(msg_id)
-                        await msg.reply(content=remind_msg)
+                        await channel.send(content=remind_msg)
                         ws.update_acell(update_cell, "1")
                     except Exception as e:
                         print(f"通知の送信に失敗: {e}")
@@ -319,7 +322,7 @@ async def reminder_task():
         print(f"リマインダータスクのエラー: {e}")
 
 # ==========================================
-# RenderのWeb Service用：HTTPサーバー（改良版）
+# RenderのWeb Service用：HTTPサーバー
 # ==========================================
 async def handle_ping(request):
     return web.Response(text="Bot is running!")
@@ -336,14 +339,12 @@ async def web_server():
 
 @bot.event
 async def setup_hook():
-    # ボット起動時にWebサーバーも一緒に立ち上げる
     bot.loop.create_task(web_server())
 
 @bot.event
 async def on_ready():
     await bot.tree.sync()
     print(f'ログイン完了: {bot.user}')
-    # エラー防止：すでに動いている場合は再スタートしない
     if not reminder_task.is_running():
         reminder_task.start() 
 
