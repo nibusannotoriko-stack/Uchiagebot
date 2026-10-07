@@ -129,3 +129,247 @@ class EventModal(discord.ui.Modal, title='🍻 打ち上げイベント作成'):
 # ==========================================
 @bot.tree.command(name="event", description="新しいイベントの受付を作成します")
 async def create_event(interaction: discord.Interaction):
+    role_names = [r.name for r in interaction.user.roles]
+    if "幹部" not in role_names:
+        await interaction.response.send_message("このコマンドは幹部専用だよ！", ephemeral=True)
+        return
+    await interaction.response.send_modal(EventModal())
+
+# ==========================================
+# メンバーが「👍」を押して参加する処理
+# ==========================================
+@bot.event
+async def on_raw_reaction_add(payload):
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != "👍":
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    member = guild.get_member(payload.user_id)
+    channel = bot.get_channel(payload.channel_id)
+    message = await channel.fetch_message(payload.message_id)
+
+    if message.author == bot.user and "のお知らせ" in message.content:
+        match_title = re.search(r'【🍺(.+?)\s*のお知らせ🍺】', message.content)
+        if not match_title:
+            return
+
+        sheet_name = match_title.group(1)
+        
+        fees = {}
+        for g in ["1", "2", "3", "4"]:
+            fee_match = re.search(rf'{g}年[:：]\s*([0-9０-９,，]+)円?', message.content)
+            if fee_match:
+                num_str = fee_match.group(1).replace(",", "").replace("，", "")
+                try:
+                    fees[f"{g}年"] = int(num_str)
+                except ValueError:
+                    fees[f"{g}年"] = "要確認"
+
+        roles = [role.name for role in member.roles]
+        univ = "不明"
+        for u in ["白百合", "本女", "慶應", "早稲田"]:
+            if u in roles:
+                univ = u
+                break
+                
+        grade = "不明"
+        for role_name in roles:
+            if "1年" in role_name:
+                grade = "1年"
+                break
+            elif "2年" in role_name:
+                grade = "2年"
+                break
+            elif "3年" in role_name:
+                grade = "3年"
+                break
+            elif "4年" in role_name:
+                grade = "4年"
+                break
+
+        fee = fees.get(grade, "要確認")
+        user_name = member.display_name
+
+        try:
+            sh = gc.open_by_key(SHEET_KEY)
+            ws = sh.worksheet(sheet_name)
+            names = ws.col_values(1)
+            
+            if user_name in names:
+                row_index = names.index(user_name) + 1
+            else:
+                row_index = len(names) + 1
+                if row_index < 2: row_index = 2
+                
+            ws.update(range_name=f'A{row_index}:D{row_index}', values=[[user_name, univ, grade, fee]])
+            
+            # 元に戻すフォーマット処理（取り消し線なし＆文字色を黒にリセット）
+            ws.format(f'A{row_index}:E{row_index}', {
+                "textFormat": {
+                    "strikethrough": False,
+                    "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                }
+            })
+            # 参加し直した場合はキャンセルの文字を消す
+            ws.update_acell(f'E{row_index}', "")
+        except Exception as e:
+            print(f"参加エラー: {e}")
+
+# ==========================================
+# メンバーが「👍」を外してキャンセルする処理
+# ==========================================
+@bot.event
+async def on_raw_reaction_remove(payload):
+    if payload.user_id == bot.user.id:
+        return
+    if str(payload.emoji) != "👍":
+        return
+
+    guild = bot.get_guild(payload.guild_id)
+    member = guild.get_member(payload.user_id)
+    channel = bot.get_channel(payload.channel_id)
+    message = await channel.fetch_message(payload.message_id)
+
+    if message.author == bot.user and "のお知らせ" in message.content:
+        match_title = re.search(r'【🍺(.+?)\s*のお知らせ🍺】', message.content)
+        if not match_title:
+            return
+
+        sheet_name = match_title.group(1)
+        
+        is_late_cancel = False
+        deadline_match = re.search(r'【締切】\s*(\d{4}/\d{1,2}/\d{1,2})[\s/]+(\d{1,2}:\d{1,2})', message.content)
+        if deadline_match:
+            try:
+                deadline_str = f"{deadline_match.group(1)} {deadline_match.group(2)}"
+                deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
+                if datetime.now(JST) > deadline:
+                    is_late_cancel = True
+                    try:
+                        await member.send(f"⚠️ {sheet_name} は締切を過ぎているため、無断キャンセルとして記録されました！至急、担当者に直接連絡してね。")
+                    except:
+                        pass
+            except ValueError:
+                pass
+
+        user_name = member.display_name
+
+        try:
+            sh = gc.open_by_key(SHEET_KEY)
+            ws = sh.worksheet(sheet_name)
+            names = ws.col_values(1)
+            
+            if user_name in names:
+                row_index = names.index(user_name) + 1
+                
+                if is_late_cancel:
+                    # 期限後の無断キャンセル：赤文字＆取り消し線
+                    ws.format(f'A{row_index}:E{row_index}', {
+                        "textFormat": {
+                            "strikethrough": True,
+                            "foregroundColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
+                        }
+                    })
+                    ws.update_acell(f'E{row_index}', "無断キャンセル")
+                else:
+                    # 通常のキャンセル：黒文字＆取り消し線
+                    ws.format(f'A{row_index}:E{row_index}', {
+                        "textFormat": {
+                            "strikethrough": True,
+                            "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                        }
+                    })
+                    ws.update_acell(f'E{row_index}', "キャンセル")
+        except Exception as e:
+            print(f"キャンセルエラー: {e}")
+
+# ==========================================
+# リマインダーをチェックするループ処理
+# ==========================================
+@tasks.loop(minutes=30)
+async def reminder_task():
+    try:
+        sh = gc.open_by_key(SHEET_KEY)
+        now = datetime.now(JST)
+
+        for ws in sh.worksheets():
+            if ws.title == "template":
+                continue
+
+            meta = ws.get('Z1:AE1')
+            if not meta or len(meta[0]) < 6:
+                continue
+
+            data = meta[0]
+            channel_id = int(data[0])
+            msg_id = int(data[1])
+            deadline_str = data[2]
+            flag_7d = data[3]
+            flag_3d = data[4]
+            flag_12h = data[5]
+
+            try:
+                deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
+            except ValueError:
+                continue
+
+            time_left = deadline - now
+            
+            if time_left.total_seconds() < 0:
+                continue
+
+            remind_msg = None
+            update_cell = None
+
+            if time_left <= timedelta(hours=12) and flag_12h == "0":
+                remind_msg = "打ち上げ締切まであと12時間です！"
+                update_cell = 'AE1'
+            elif time_left <= timedelta(days=3) and flag_3d == "0":
+                remind_msg = "打ち上げ締切まであと3日です！"
+                update_cell = 'AD1'
+            elif time_left <= timedelta(days=7) and flag_7d == "0":
+                remind_msg = "打ち上げ締切まであと7日です！"
+                update_cell = 'AC1'
+
+            if remind_msg and update_cell:
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    try:
+                        await channel.send(content=remind_msg)
+                        ws.update_acell(update_cell, "1")
+                    except Exception as e:
+                        print(f"通知の送信に失敗: {e}")
+
+    except Exception as e:
+        print(f"リマインダータスクのエラー: {e}")
+
+# ==========================================
+# RenderのWeb Service用：HTTPサーバー
+# ==========================================
+async def handle_ping(request):
+    return web.Response(text="Bot is running!")
+
+async def web_server():
+    app = web.Application()
+    app.router.add_get("/", handle_ping)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    port = int(os.environ.get("PORT", 8080))
+    site = web.TCPSite(runner, "0.0.0.0", port)
+    await site.start()
+    print(f"Web server started on port {port}")
+
+@bot.event
+async def setup_hook():
+    bot.loop.create_task(web_server())
+
+@bot.event
+async def on_ready():
+    await bot.tree.sync()
+    print(f'ログイン完了: {bot.user}')
+    if not reminder_task.is_running():
+        reminder_task.start() 
+
+bot.run(TOKEN)
