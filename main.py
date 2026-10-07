@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 import gspread
 import os
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 
 # 環境変数の読み込み
@@ -13,6 +13,9 @@ TOKEN = os.getenv('DISCORD_BOT_TOKEN')
 # Googleスプレッドシートの準備
 gc = gspread.service_account(filename='credentials.json')
 SHEET_KEY = '1fOlux4ls7yFasqOr_qcrFkExMUvD1vqdIDYAN7481xc'
+
+# 日本時間（JST）の設定
+JST = timezone(timedelta(hours=9), 'JST')
 
 # ボットの設定
 intents = discord.Intents.default()
@@ -115,6 +118,14 @@ class EventModal(discord.ui.Modal, title='🍻 打ち上げイベント作成'):
         bot_msg = await interaction.channel.send(content=message_content)
         await bot_msg.add_reaction("👍")
         
+        # ▼ 追加：リマインダー用にスプシの右端(Z列付近)にメッセージ情報を保存
+        try:
+            ws = sh.worksheet(sheet_name)
+            meta_data = [[str(interaction.channel.id), str(bot_msg.id), self.deadline.value, "0", "0", "0"]]
+            ws.update(range_name='Z1:AE1', values=meta_data)
+        except Exception as e:
+            print(f"リマインダー用データの保存エラー: {e}")
+            
         await interaction.followup.send(f"✅ {sheet_name} の受付メッセージを作成しました！", ephemeral=True)
 
 # ==========================================
@@ -150,7 +161,6 @@ async def on_raw_reaction_add(payload):
 
         sheet_name = match_title.group(1)
         
-        # 【修正！】スプシの計算バグを防ぐため、カンマや「円」を取り除いて純粋な数字(int)にする
         fees = {}
         for g in ["1", "2", "3", "4"]:
             fee_match = re.search(rf'{g}年[:：]\s*([0-9０-９,，]+)円?', message.content)
@@ -197,7 +207,7 @@ async def on_raw_reaction_add(payload):
                 row_index = len(names) + 1
                 if row_index < 2: row_index = 2
                 
-            ws.update(f'A{row_index}:D{row_index}', [[user_name, univ, grade, fee]])
+            ws.update(range_name=f'A{row_index}:D{row_index}', values=[[user_name, univ, grade, fee]])
             ws.format(f'A{row_index}:D{row_index}', {"textFormat": {"strikethrough": False}})
         except Exception as e:
             print(f"参加エラー: {e}")
@@ -228,8 +238,9 @@ async def on_raw_reaction_remove(payload):
         if deadline_match:
             try:
                 deadline_str = f"{deadline_match.group(1)} {deadline_match.group(2)}"
-                deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M")
-                if datetime.now() > deadline:
+                # 締切を日本時間で認識
+                deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
+                if datetime.now(JST) > deadline:
                     try:
                         await member.send(f"⚠️ {sheet_name} は締切を過ぎているため、キャンセルできません！担当者に直接連絡してね。")
                     except:
@@ -251,9 +262,72 @@ async def on_raw_reaction_remove(payload):
         except Exception as e:
             print(f"キャンセルエラー: {e}")
 
-@tasks.loop(hours=24)
+# ==========================================
+# ▼ 追加：リマインダーをチェックするループ処理 ▼
+# ==========================================
+@tasks.loop(minutes=30)  # 30分ごとにチェック
 async def reminder_task():
-    pass
+    try:
+        sh = gc.open_by_key(SHEET_KEY)
+        now = datetime.now(JST)
+
+        for ws in sh.worksheets():
+            if ws.title == "template":
+                continue
+
+            # スプシのZ1〜AE1に保存したデータを取得
+            meta = ws.get('Z1:AE1')
+            if not meta or len(meta[0]) < 6:
+                continue
+
+            data = meta[0]
+            channel_id = int(data[0])
+            msg_id = int(data[1])
+            deadline_str = data[2]
+            flag_7d = data[3]
+            flag_3d = data[4]
+            flag_12h = data[5]
+
+            try:
+                deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
+            except ValueError:
+                continue
+
+            time_left = deadline - now
+            
+            # 締切を過ぎている場合は何もしない
+            if time_left.total_seconds() < 0:
+                continue
+
+            remind_msg = None
+            update_cell = None
+
+            # 12時間前通知
+            if time_left <= timedelta(hours=12) and flag_12h == "0":
+                remind_msg = "⏰ **【リマインド】**\n締切まであと **12時間** を切ったよ！未回収の人は急いでね！"
+                update_cell = 'AE1'
+            # 3日前通知
+            elif time_left <= timedelta(days=3) and flag_3d == "0":
+                remind_msg = "⏰ **【リマインド】**\n締切まであと **3日** だよ！参加予定で未回答の人は早めにリアクションしてね！"
+                update_cell = 'AD1'
+            # 7日前通知
+            elif time_left <= timedelta(days=7) and flag_7d == "0":
+                remind_msg = "⏰ **【リマインド】**\n締切まであと **1週間（7日）** だよ！予定がわかった人はリアクションよろしくね！"
+                update_cell = 'AC1'
+
+            # 条件に合えば元のメッセージを「引用」して送信
+            if remind_msg and update_cell:
+                channel = bot.get_channel(channel_id)
+                if channel:
+                    try:
+                        msg = await channel.fetch_message(msg_id)
+                        await msg.reply(content=remind_msg)
+                        ws.update_acell(update_cell, "1")  # 送信済みフラグを立てる
+                    except Exception as e:
+                        print(f"通知の送信に失敗: {e}")
+
+    except Exception as e:
+        print(f"リマインダータスクのエラー: {e}")
 
 @bot.event
 async def on_ready():
@@ -271,16 +345,3 @@ class SimpleHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Bot is running!")
-
-def run_server():
-    # Renderが割り当てるポート番号（環境変数PORT）を取得。なければ8080を使う
-    port = int(os.environ.get("PORT", 8080))
-    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
-    server.serve_forever()
-
-# ボットを起動する前に、裏でウェブサーバーを動かすスレッドをスタート
-server_thread = threading.Thread(target=run_server, daemon=True)
-server_thread.start()
-
-bot.run(TOKEN)
