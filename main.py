@@ -128,4 +128,4 @@ class EventModal(discord.ui.Modal, title='🍻 打ち上げイベント作成'):
 # スラッシュコマンドの設定
 # ==========================================
 @bot.tree.command(name="event", description="新しいイベントの受付を作成します")
-async def create_event(interaction: discord.Interaction
+async def create_event(interaction: discord.Interaction):
