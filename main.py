@@ -261,4 +261,26 @@ async def on_ready():
     print(f'ログイン完了: {bot.user}')
     reminder_task.start() 
 
+# ==========================================
+# RenderのWeb Service用：簡易HTTPサーバー
+# ==========================================
+from http.server import HTTPServer, BaseHTTPRequestHandler
+import threading
+
+class SimpleHandler(BaseHTTPRequestHandler):
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Bot is running!")
+
+def run_server():
+    # Renderが割り当てるポート番号（環境変数PORT）を取得。なければ8080を使う
+    port = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(('0.0.0.0', port), SimpleHandler)
+    server.serve_forever()
+
+# ボットを起動する前に、裏でウェブサーバーを動かすスレッドをスタート
+server_thread = threading.Thread(target=run_server, daemon=True)
+server_thread.start()
+
 bot.run(TOKEN)
