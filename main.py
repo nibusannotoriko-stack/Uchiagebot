@@ -3,6 +3,7 @@ from discord.ext import commands, tasks
 import gspread
 import os
 import re
+import asyncio
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 from aiohttp import web
@@ -24,6 +25,79 @@ intents.message_content = True
 intents.reactions = True
 intents.members = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+# ==========================================
+# 順番待ち（キュー）システムの設定
+# ==========================================
+action_queue = asyncio.Queue()
+
+async def process_queue():
+    await bot.wait_until_ready()
+    while not bot.is_closed():
+        action = await action_queue.get()
+        try:
+            # ここでスプシへの書き込み処理を順番に実行する
+            await process_sheet_update(action)
+        except Exception as e:
+            print(f"キュー処理エラー: {e}")
+        finally:
+            action_queue.task_done()
+            # 連続アクセスを防ぐために2秒待つ（Google APIの制限対策！）
+            await asyncio.sleep(2)
+
+async def process_sheet_update(action):
+    action_type = action['type']
+    sheet_name = action['sheet_name']
+    user_name = action['user_name']
+    
+    try:
+        sh = gc.open_by_key(SHEET_KEY)
+        ws = sh.worksheet(sheet_name)
+        names = ws.col_values(1)
+        
+        if user_name in names:
+            row_index = names.index(user_name) + 1
+        else:
+            row_index = len(names) + 1
+            if row_index < 2: row_index = 2
+
+        if action_type == 'add':
+            univ = action['univ']
+            grade = action['grade']
+            fee = action['fee']
+            
+            ws.update(range_name=f'A{row_index}:D{row_index}', values=[[user_name, univ, grade, fee]])
+            ws.format(f'A{row_index}:E{row_index}', {
+                "textFormat": {
+                    "strikethrough": False,
+                    "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                }
+            })
+            ws.update_acell(f'E{row_index}', "")
+            
+        elif action_type == 'remove':
+            is_late_cancel = action['is_late_cancel']
+            
+            if is_late_cancel:
+                ws.format(f'A{row_index}:E{row_index}', {
+                    "textFormat": {
+                        "strikethrough": True,
+                        "foregroundColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
+                    }
+                })
+                ws.update_acell(f'E{row_index}', "無断キャンセル")
+            else:
+                ws.format(f'A{row_index}:E{row_index}', {
+                    "textFormat": {
+                        "strikethrough": True,
+                        "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
+                    }
+                })
+                ws.update_acell(f'E{row_index}', "キャンセル")
+                
+    except Exception as e:
+        print(f"スプシ更新エラー: {e}")
+
 
 # ==========================================
 # 秘密の入力フォーム（Modal）の設定
@@ -192,30 +266,16 @@ async def on_raw_reaction_add(payload):
         fee = fees.get(grade, "要確認")
         user_name = member.display_name
 
-        try:
-            sh = gc.open_by_key(SHEET_KEY)
-            ws = sh.worksheet(sheet_name)
-            names = ws.col_values(1)
-            
-            if user_name in names:
-                row_index = names.index(user_name) + 1
-            else:
-                row_index = len(names) + 1
-                if row_index < 2: row_index = 2
-                
-            ws.update(range_name=f'A{row_index}:D{row_index}', values=[[user_name, univ, grade, fee]])
-            
-            # 元に戻すフォーマット処理（取り消し線なし＆文字色を黒にリセット）
-            ws.format(f'A{row_index}:E{row_index}', {
-                "textFormat": {
-                    "strikethrough": False,
-                    "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
-                }
-            })
-            # 参加し直した場合はキャンセルの文字を消す
-            ws.update_acell(f'E{row_index}', "")
-        except Exception as e:
-            print(f"参加エラー: {e}")
+        # 変更点：直接スプシに書き込まず、キュー（順番待ち列）に入れる！
+        action = {
+            'type': 'add',
+            'sheet_name': sheet_name,
+            'user_name': user_name,
+            'univ': univ,
+            'grade': grade,
+            'fee': fee
+        }
+        await action_queue.put(action)
 
 # ==========================================
 # メンバーが「👍」を外してキャンセルする処理
@@ -247,6 +307,7 @@ async def on_raw_reaction_remove(payload):
                 deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
                 if datetime.now(JST) > deadline:
                     is_late_cancel = True
+                    # DMの送信だけは順番待ちせずにその場ですぐ送る！
                     try:
                         await member.send(f"⚠️ {sheet_name} は締切を過ぎているため、無断キャンセルとして記録されました！至急、担当者に直接連絡してね。")
                     except:
@@ -256,34 +317,14 @@ async def on_raw_reaction_remove(payload):
 
         user_name = member.display_name
 
-        try:
-            sh = gc.open_by_key(SHEET_KEY)
-            ws = sh.worksheet(sheet_name)
-            names = ws.col_values(1)
-            
-            if user_name in names:
-                row_index = names.index(user_name) + 1
-                
-                if is_late_cancel:
-                    # 期限後の無断キャンセル：赤文字＆取り消し線
-                    ws.format(f'A{row_index}:E{row_index}', {
-                        "textFormat": {
-                            "strikethrough": True,
-                            "foregroundColor": {"red": 1.0, "green": 0.0, "blue": 0.0}
-                        }
-                    })
-                    ws.update_acell(f'E{row_index}', "無断キャンセル")
-                else:
-                    # 通常のキャンセル：黒文字＆取り消し線
-                    ws.format(f'A{row_index}:E{row_index}', {
-                        "textFormat": {
-                            "strikethrough": True,
-                            "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
-                        }
-                    })
-                    ws.update_acell(f'E{row_index}', "キャンセル")
-        except Exception as e:
-            print(f"キャンセルエラー: {e}")
+        # 変更点：スプシへのキャンセル記録もキュー（順番待ち列）に入れる！
+        action = {
+            'type': 'remove',
+            'sheet_name': sheet_name,
+            'user_name': user_name,
+            'is_late_cancel': is_late_cancel
+        }
+        await action_queue.put(action)
 
 # ==========================================
 # リマインダーをチェックするループ処理
@@ -364,6 +405,8 @@ async def web_server():
 @bot.event
 async def setup_hook():
     bot.loop.create_task(web_server())
+    # ここでキュー（順番待ち処理）を動かす命令を追加！
+    bot.loop.create_task(process_queue())
 
 @bot.event
 async def on_ready():
