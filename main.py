@@ -29,11 +29,15 @@ bot = commands.Bot(command_prefix='!', intents=intents)
 # ==========================================
 # 順番待ち（キュー）システムの設定
 # ==========================================
-action_queue = asyncio.Queue()
+action_queue = None
 
 async def process_queue():
     await bot.wait_until_ready()
     while not bot.is_closed():
+        if action_queue is None:
+            await asyncio.sleep(1)
+            continue
+            
         action = await action_queue.get()
         try:
             # ここでスプシへの書き込み処理を順番に実行する
@@ -266,7 +270,6 @@ async def on_raw_reaction_add(payload):
         fee = fees.get(grade, "要確認")
         user_name = member.display_name
 
-        # 変更点：直接スプシに書き込まず、キュー（順番待ち列）に入れる！
         action = {
             'type': 'add',
             'sheet_name': sheet_name,
@@ -275,7 +278,8 @@ async def on_raw_reaction_add(payload):
             'grade': grade,
             'fee': fee
         }
-        await action_queue.put(action)
+        if action_queue is not None:
+            await action_queue.put(action)
 
 # ==========================================
 # メンバーが「👍」を外してキャンセルする処理
@@ -307,7 +311,6 @@ async def on_raw_reaction_remove(payload):
                 deadline = datetime.strptime(deadline_str, "%Y/%m/%d %H:%M").replace(tzinfo=JST)
                 if datetime.now(JST) > deadline:
                     is_late_cancel = True
-                    # DMの送信だけは順番待ちせずにその場ですぐ送る！
                     try:
                         await member.send(f"⚠️ {sheet_name} は締切を過ぎているため、無断キャンセルとして記録されました！至急、担当者に直接連絡してね。")
                     except:
@@ -317,14 +320,14 @@ async def on_raw_reaction_remove(payload):
 
         user_name = member.display_name
 
-        # 変更点：スプシへのキャンセル記録もキュー（順番待ち列）に入れる！
         action = {
             'type': 'remove',
             'sheet_name': sheet_name,
             'user_name': user_name,
             'is_late_cancel': is_late_cancel
         }
-        await action_queue.put(action)
+        if action_queue is not None:
+            await action_queue.put(action)
 
 # ==========================================
 # リマインダーをチェックするループ処理
@@ -404,8 +407,10 @@ async def web_server():
 
 @bot.event
 async def setup_hook():
+    global action_queue
+    action_queue = asyncio.Queue()
+    
     bot.loop.create_task(web_server())
-    # ここでキュー（順番待ち処理）を動かす命令を追加！
     bot.loop.create_task(process_queue())
 
 @bot.event
