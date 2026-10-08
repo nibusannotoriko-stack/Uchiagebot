@@ -40,13 +40,12 @@ async def process_queue():
             
         action = await action_queue.get()
         try:
-            # ここでスプシへの書き込み処理を順番に実行する
             await process_sheet_update(action)
         except Exception as e:
             print(f"キュー処理エラー: {e}")
         finally:
             action_queue.task_done()
-            # 連続アクセスを防ぐために6秒待つ（Google APIの制限対策！）
+            # 連続アクセスを防ぐために6秒待つ（Google APIの制限対策）
             await asyncio.sleep(6)
 
 async def process_sheet_update(action):
@@ -70,10 +69,7 @@ async def process_sheet_update(action):
             grade = action['grade']
             fee = action['fee']
             
-            # A〜E列まで一気に書き込んで通信回数を減らす！空白じゃなく「未回収」を入れる！
             ws.update(range_name=f'A{row_index}:E{row_index}', values=[[user_name, univ, grade, fee, "未回収"]])
-            
-            # 取り消し線と文字色（黒）をリセット
             ws.format(f'A{row_index}:E{row_index}', {
                 "textFormat": {
                     "strikethrough": False,
@@ -82,7 +78,7 @@ async def process_sheet_update(action):
             })
             
         elif action_type == 'remove':
-            # ★追加：スプシにまだ名前がないのにキャンセルされた場合はスキップ！
+            # スプシにまだ名前がないのにキャンセルされた場合はスキップ
             if user_name not in names:
                 return
                 
@@ -230,7 +226,17 @@ async def on_raw_reaction_add(payload):
         return
 
     guild = bot.get_guild(payload.guild_id)
-    member = guild.get_member(payload.user_id)
+    
+    # ★修正：強制的にユーザー情報を取得して絶対に無視させない！
+    member = payload.member
+    if not member:
+        member = guild.get_member(payload.user_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except Exception:
+            return
+            
     channel = bot.get_channel(payload.channel_id)
     message = await channel.fetch_message(payload.message_id)
 
@@ -298,7 +304,15 @@ async def on_raw_reaction_remove(payload):
         return
 
     guild = bot.get_guild(payload.guild_id)
+    
+    # ★修正：強制的にユーザー情報を取得して絶対に無視させない！
     member = guild.get_member(payload.user_id)
+    if not member:
+        try:
+            member = await guild.fetch_member(payload.user_id)
+        except Exception:
+            return
+            
     channel = bot.get_channel(payload.channel_id)
     message = await channel.fetch_message(payload.message_id)
 
