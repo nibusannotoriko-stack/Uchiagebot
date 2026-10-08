@@ -45,7 +45,7 @@ async def process_queue():
             print(f"キュー処理エラー: {e}")
         finally:
             action_queue.task_done()
-            # 連続アクセスを防ぐために6秒待つ（Google APIの制限対策）
+            # 連続アクセスを防ぐために6秒待つ
             await asyncio.sleep(6)
 
 async def process_sheet_update(action):
@@ -58,11 +58,16 @@ async def process_sheet_update(action):
         ws = sh.worksheet(sheet_name)
         names = ws.col_values(1)
         
+        print(f"【ログ】スプシの名前一覧: {names}")
+        print(f"【ログ】探している名前: {user_name}")
+        
         if user_name in names:
             row_index = names.index(user_name) + 1
+            print(f"【ログ】名前を発見！行番号: {row_index} で処理します")
         else:
             row_index = len(names) + 1
             if row_index < 2: row_index = 2
+            print(f"【ログ】名前が見つかりません。新規行: {row_index} を想定")
 
         if action_type == 'add':
             univ = action['univ']
@@ -76,10 +81,11 @@ async def process_sheet_update(action):
                     "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
                 }
             })
+            print("【ログ】参加（add）の書き込みが完了しました")
             
         elif action_type == 'remove':
-            # スプシにまだ名前がないのにキャンセルされた場合はスキップ
             if user_name not in names:
+                print("【ログ】⚠️スプシに名前がないため、キャンセル処理を意図的にスキップしました！")
                 return
                 
             is_late_cancel = action['is_late_cancel']
@@ -100,10 +106,10 @@ async def process_sheet_update(action):
                     }
                 })
                 ws.update_acell(f'E{row_index}', "キャンセル")
+            print("【ログ】キャンセル（remove）の書き込みが完了しました")
                 
     except Exception as e:
         print(f"スプシ更新エラー: {e}")
-
 
 # ==========================================
 # 秘密の入力フォーム（Modal）の設定
@@ -227,7 +233,6 @@ async def on_raw_reaction_add(payload):
 
     guild = bot.get_guild(payload.guild_id)
     
-    # ★修正：強制的にユーザー情報を取得して絶対に無視させない！
     member = payload.member
     if not member:
         member = guild.get_member(payload.user_id)
@@ -305,12 +310,12 @@ async def on_raw_reaction_remove(payload):
 
     guild = bot.get_guild(payload.guild_id)
     
-    # ★修正：強制的にユーザー情報を取得して絶対に無視させない！
     member = guild.get_member(payload.user_id)
     if not member:
         try:
             member = await guild.fetch_member(payload.user_id)
-        except Exception:
+        except Exception as e:
+            print(f"【ログ】⚠️キャンセル時のメンバー取得に失敗しました: {e}")
             return
             
     channel = bot.get_channel(payload.channel_id)
@@ -322,7 +327,6 @@ async def on_raw_reaction_remove(payload):
             return
 
         sheet_name = match_title.group(1)
-        
         is_late_cancel = False
         deadline_match = re.search(r'【締切】\s*(\d{4}/\d{1,2}/\d{1,2})[\s/]+(\d{1,2}:\d{1,2})', message.content)
         if deadline_match:
@@ -339,6 +343,7 @@ async def on_raw_reaction_remove(payload):
                 pass
 
         user_name = member.display_name
+        print(f"【ログ】キャンセルを受付しました。キューに並びます: {user_name}")
 
         action = {
             'type': 'remove',
