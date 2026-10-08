@@ -47,7 +47,7 @@ async def process_queue():
         finally:
             action_queue.task_done()
             # 連続アクセスを防ぐために2秒待つ（Google APIの制限対策！）
-            await asyncio.sleep(2)
+            await asyncio.sleep(6)
 
 async def process_sheet_update(action):
     action_type = action['type']
