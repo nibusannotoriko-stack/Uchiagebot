@@ -46,8 +46,8 @@ async def process_queue():
             print(f"キュー処理エラー: {e}")
         finally:
             action_queue.task_done()
-            # 連続アクセスを防ぐために2秒待つ（Google APIの制限対策！）
-            await asyncio.sleep(2)
+            # 連続アクセスを防ぐために6秒待つ（Google APIの制限対策！）
+            await asyncio.sleep(6)
 
 async def process_sheet_update(action):
     action_type = action['type']
@@ -70,16 +70,22 @@ async def process_sheet_update(action):
             grade = action['grade']
             fee = action['fee']
             
-            ws.update(range_name=f'A{row_index}:D{row_index}', values=[[user_name, univ, grade, fee]])
+            # A〜E列まで一気に書き込んで通信回数を減らす！空白じゃなく「未回収」を入れる！
+            ws.update(range_name=f'A{row_index}:E{row_index}', values=[[user_name, univ, grade, fee, "未回収"]])
+            
+            # 取り消し線と文字色（黒）をリセット
             ws.format(f'A{row_index}:E{row_index}', {
                 "textFormat": {
                     "strikethrough": False,
                     "foregroundColor": {"red": 0.0, "green": 0.0, "blue": 0.0}
                 }
             })
-            ws.update_acell(f'E{row_index}', "")
             
         elif action_type == 'remove':
+            # ★追加：スプシにまだ名前がないのにキャンセルされた場合はスキップ！
+            if user_name not in names:
+                return
+                
             is_late_cancel = action['is_late_cancel']
             
             if is_late_cancel:
